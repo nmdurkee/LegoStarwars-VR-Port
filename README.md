@@ -75,7 +75,10 @@ Copy these files into the game folder, usually
 Start your OpenXR runtime, put the headset on (the session only becomes ready while the headset is worn),
 then launch the game from Steam. The mod starts the host itself. To uninstall, delete `d3d9.dll`.
 
-The game folder gets these logs: `lsw_vr.log` (mod) and `lsw_vr_host.log` (host).
+The game folder gets these logs: `lsw_vr.log` (mod) and `lsw_vr_host.log` (host). If shots go the
+wrong way, look for `interaction: shot` lines in `lsw_vr.log`. Each one gives the aim, the direction
+the game wanted, where the bolt actually went and the head's forward, plus the angles between them. If
+a shot wasn't aimed, the line also says why.
 
 ## Controls
 

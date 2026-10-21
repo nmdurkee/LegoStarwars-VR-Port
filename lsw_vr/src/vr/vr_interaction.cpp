@@ -128,6 +128,11 @@ namespace {
     bool g_aim_valid = false;
     float g_aim[3] = {};
     bool g_firing = false;
+    // Shot diagnostics: the head's world forward (same frame as g_aim), why
+    // the aim is unset, and when a player shot was last logged.
+    float g_head_forward[3] = {};
+    const char *g_aim_invalid_reason = "not updated yet";
+    float g_last_shot_log = -1.0f;
     ObjHitObjFn g_obj_hit_obj = nullptr;
     ObjHitObjFlagsFn g_obj_hit_obj_flags = nullptr;
     BlowUpHitFn g_blowup_hit = nullptr;  // optional: breaking props
@@ -745,9 +750,41 @@ namespace {
     // The player's bolts leave the muzzle exactly along the aim ray: the shot
     // matrix's rotation is rebuilt from it (forward = aim, right level), so the
     // game's target-seeking angles are discarded. No aim assist.
+    // Logs a player shot (at most a few a second): the aim, the direction the
+    // game wanted (its shot matrix's forward row), where the bolt actually
+    // went, and the head's forward, all world space.
+    void LogPlayerShot(const char *what, const float *position, const float *matrix, const void *bolt) {
+        if (g_clock - g_last_shot_log < 0.3f) {
+            return;
+        }
+        g_last_shot_log = g_clock;
+        __try {
+            const Vec3 game = matrix != nullptr ? Vec3{matrix[8], matrix[9], matrix[10]} : Vec3{};
+            const Vec3 aim = {g_aim[0], g_aim[1], g_aim[2]};
+            const Vec3 head = {g_head_forward[0], g_head_forward[1], g_head_forward[2]};
+            const Vec3 flew = bolt != nullptr ? Unit(FieldVec(bolt, kBoltVelocity)) : Vec3{};
+            const Vec3 at = position != nullptr ? Vec3{position[0], position[1], position[2]} : Vec3{};
+            const float to_degrees = 180.0f / 3.14159265f;
+            const auto angle = [&](Vec3 a, Vec3 b) {
+                return std::acos(std::clamp(Dot(Unit(a), Unit(b)), -1.0f, 1.0f)) * to_degrees;
+            };
+            Log("interaction: shot %s; from (%.2f %.2f %.2f) aim (% .2f % .2f % .2f) game (% .2f % .2f % .2f) bolt "
+                "(% .2f % .2f % .2f) head (% .2f % .2f % .2f); bolt-aim %.0f deg, aim-head %.0f deg, game-aim %.0f deg",
+                what, at.x, at.y, at.z, aim.x, aim.y, aim.z, game.x, game.y, game.z, flew.x, flew.y, flew.z, head.x,
+                head.y, head.z, angle(flew, aim), angle(aim, head), angle(game, aim));
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+    }
+
     void *__cdecl HookBoltAdd(void *owner, float *position, float *matrix, int type, int flags) {
         if (!g_aim_valid || matrix == nullptr || owner == nullptr || owner != Player()) {
-            return g_real_bolt_add(owner, position, matrix, type, flags);
+            void *bolt = g_real_bolt_add(owner, position, matrix, type, flags);
+            if (owner != nullptr && owner == Player()) {
+                char what[96];
+                sprintf_s(what, "NOT aimed (%s)", !g_aim_valid ? g_aim_invalid_reason : "no matrix");
+                LogPlayerShot(what, position, matrix, bolt);
+            }
+            return bolt;
         }
         const Vec3 forward = {g_aim[0], g_aim[1], g_aim[2]};
         Vec3 right = {forward.z, 0.0f, -forward.x};  // level, to the right of the aim
@@ -764,7 +801,9 @@ namespace {
             aimed[row * 4 + 2] = rows[row].z;
             aimed[row * 4 + 3] = 0.0f;
         }
-        return g_real_bolt_add(owner, position, aimed, type, flags);
+        void *bolt = g_real_bolt_add(owner, position, aimed, type, flags);
+        LogPlayerShot("aimed", position, matrix, bolt);
+        return bolt;
     }
 
     // Every shooter's gun is in the right hand (the VR hands put it there).
@@ -775,20 +814,26 @@ namespace {
         g_aim_valid = false;
         constexpr int side = 1;
         if (IsSabreUser(player)) {
+            g_aim_invalid_reason = "sabre user";
             g_firing = false;
             return;
         }
         const VrHand &hand = tracking.hands[side];
         float position[3], axes[9];
+        if (CameraTrackingToWorld(tracking.head.pose, position, axes)) {
+            g_head_forward[0] = axes[6], g_head_forward[1] = axes[7], g_head_forward[2] = axes[8];
+        }
         const bool from_head = CameraGunAimFromHead();
         if (!hand.tracked ||
             !CameraTrackingToWorld(from_head ? tracking.head.pose : hand.aim, position, axes)) {
+            g_aim_invalid_reason = hand.tracked ? "no world mapping" : "right hand untracked";
             g_firing = false;
             return;
         }
         const Vec3 aim = {axes[6], axes[7], axes[8]};
         const float length = Length(aim);
         if (length < 1e-4f) {
+            g_aim_invalid_reason = "zero aim";
             return;
         }
         g_aim[0] = aim.x / length, g_aim[1] = aim.y / length, g_aim[2] = aim.z / length;
@@ -923,6 +968,7 @@ void VrInteractionOnPresent(unsigned frame) {
         ResetBlade();
     }
     if (tracking == nullptr || player == nullptr || !in_play) {
+        g_aim_invalid_reason = tracking == nullptr ? "no tracking" : (player == nullptr ? "no player" : "not in play");
         g_aim_valid = false;
         g_firing = false;
         return;
